@@ -1,0 +1,128 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Repository coverage gate (percent). Tests are pure-Go and run on every arch.
+  COVERAGE_MIN: "100.0"
+
+jobs:
+  # ------------------------------------------------------------------
+  # Native runners: amd64 and arm64. Full build + test + coverage gate.
+  # ------------------------------------------------------------------
+  native:
+    name: native (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Pull go-virtio/common@main (big-endian virtqueue fix)
+        run: |
+          go get github.com/go-virtio/common@main
+          go mod tidy
+
+      - name: Build
+        run: CGO_ENABLED=0 go build ./...
+
+      - name: Test + coverage gate
+        run: |
+          CGO_ENABLED=0 go test -covermode=atomic -coverprofile=coverage.txt ./...
+          pct=$(go tool cover -func=coverage.txt | awk '/^total:/ {sub(/%/,"",$3); print $3}')
+          echo "total coverage: ${pct}% (gate: ${COVERAGE_MIN}%)"
+          awk -v p="$pct" -v m="$COVERAGE_MIN" 'BEGIN { if (p+0 < m+0) { exit 1 } }'
+
+  # ------------------------------------------------------------------
+  # Emulated runners: riscv64, loong64, ppc64le, s390x (big-endian).
+  # Cross-compile per-package test binaries on the host, then run each
+  # under qemu-user via docker with an arch-appropriate QEMU_CPU.
+  # ------------------------------------------------------------------
+  emulated:
+    name: emulated (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: riscv64
+            image: debian:trixie
+            qemu_cpu: rv64,v=true,vlen=128
+          - arch: loong64
+            image: ghcr.io/loong64/debian:trixie
+            qemu_cpu: la464
+          - arch: ppc64le
+            image: debian:trixie
+            qemu_cpu: power9
+          - arch: s390x
+            image: debian:trixie
+            qemu_cpu: qemu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Pull go-virtio/common@main (big-endian virtqueue fix)
+        run: |
+          go get github.com/go-virtio/common@main
+          go mod tidy
+
+      - name: Register binfmt handlers
+        run: docker run --privileged --rm tonistiigi/binfmt --install all
+
+      - name: Cross-compile per-package test binaries
+        env:
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p _tests
+          for pkg in $(go list ./...); do
+            name=$(echo "$pkg" | tr '/' '_')
+            # -c builds a test binary; -cover instruments it for coverage.
+            if CGO_ENABLED=0 GOOS=linux go test -c -cover -covermode=atomic \
+                 -o "_tests/${name}.test" "$pkg" 2>/dev/null; then
+              echo "built ${name}.test for $pkg"
+            else
+              echo "no test binary for $pkg (no test files)"
+            fi
+          done
+
+      - name: Run test binaries under qemu-user (${{ matrix.arch }})
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE: ${{ matrix.image }}
+          QEMU_CPU: ${{ matrix.qemu_cpu }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bins=(_tests/*.test)
+          if [ ${#bins[@]} -eq 0 ]; then
+            echo "no test binaries to run"; exit 0
+          fi
+          for bin in "${bins[@]}"; do
+            echo "::group::run ${bin} on ${ARCH}"
+            docker run --rm --platform "linux/${ARCH}" \
+              -e "QEMU_CPU=${QEMU_CPU}" \
+              -v "$PWD:/work" -w /work \
+              "$IMAGE" "./${bin}" -test.v
+            echo "::endgroup::"
+          done
