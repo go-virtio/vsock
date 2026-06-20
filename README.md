@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-virtio/brand/main/social/go-virtio-vsock.png" alt="go-virtio/vsock" width="720"></p>
+
 # go-virtio/vsock
 
 Pure-Go virtio-vsock (socket device) driver targeting the
