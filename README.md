@@ -66,7 +66,7 @@ event queues pre-posted and `GuestCID` populated from device config.
   - [`github.com/go-virtio/rng`](https://github.com/go-virtio/rng) —
     pure-Go virtio-rng driver.
   - [`github.com/go-virtio/blk`](https://github.com/go-virtio/blk) —
-    placeholder for a future pure-Go virtio-blk driver.
+    pure-Go virtio-blk (block device) driver.
 
 ## License
 
